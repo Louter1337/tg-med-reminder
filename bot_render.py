@@ -1,4 +1,3 @@
-
 import os
 import asyncio
 import logging
@@ -7,11 +6,11 @@ from datetime import datetime, timedelta, time as dtime
 from io import BytesIO
 from zoneinfo import ZoneInfo
 
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application, ApplicationBuilder, CommandHandler, ContextTypes,
-    ChatJoinRequestHandler
+    ChatJoinRequestHandler, CallbackQueryHandler
 )
 import httpx
 
@@ -29,24 +28,83 @@ ALMATY_TZ = ZoneInfo("Asia/Almaty")
 REMINDER_TIME = dtime(hour=8, minute=0, tzinfo=ALMATY_TZ)  # 08:00 по Алматы
 CAT_PROB = float(os.getenv("CAT_PROB", "0.30"))
 
-LOVE_PHRASES = [
-    "💖 Любимая, не забудь, пожалуйста, выпить лекарство.",
-    "💊 Забота о тебе — главное. Прими лекарство, солнышко.",
-    "✨ Ты у меня самая лучшая. Время для лекарства!",
-    "🥰 Нежно напоминаю: таблеточка — и день станет лучше.",
-    "🌸 Пусть это маленькое напоминание сохранит твоё здоровье.",
-    "🤍 Береги себя, пожалуйста. Пора принять лекарство.",
-    "🌞 Доброе утро, любовь! Лекарство ждёт тебя."
+# ---------- ГЕНЕРАТОР ТЕКСТОВ ----------
+WEEKDAY_RU = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+
+HEADERS = [
+    "<b>Напоминание</b>: пора принять лекарство.",
+    "Доброго утра! Самое время для лекарства.",
+    "Мягкий сигнал заботы: настало время лекарства.",
+    "Тёплый пинг здоровья: таблеточка сейчас будет кстати.",
+    "Небольшой знак внимания: примени лекарство.",
+    "Пусть утро начнётся правильно — лекарство ждёт.",
+    "Забота о тебе в расписании: лекарство сейчас.",
+    "Рутина для здоровья: пора принять лекарство.",
+    "Пока чай остывает — самое время для лекарства.",
+    "Нежное напоминание: лекарство — и день ровнее.",
+    "Привычка, которая бережёт: лекарство к 08:00.",
+    "Доброе утро и плюсик к самочувствию — лекарство.",
+    "План на утро: лекарство — и вперёд по делам.",
+    "Утренний чек‑ин: лекарство в этот {weekday}.",
+    "Пусть {weekday} начнётся спокойно — лекарство вовремя."
 ]
 
-REMINDER_TEXT_TPL = (
-    "{heart}\n"
-    "<b>Напоминание</b>: пора принять лекарство.\n\n"
-    "{phrase}\n\n"
-    "Если что-то нужно — напиши мне ❤️"
-)
+STARTERS = [
+    "Любимая,", "Родная,", "Солнышко,", "Милая,", "Дорогая,", "Ласточка,", "Зайка,", "Ты моя радость,"
+]
 
-# ---------- УТИЛИТЫ ----------
+CLAUSES_A = [
+    "позаботься о себе",
+    "небольшой шаг — большой вклад в здоровье",
+    "пусть организм скажет спасибо",
+    "ещё один плюсик к самочувствию",
+    "берегу тебя, поэтому напоминаю",
+    "ты у меня самая важная — береги себя",
+    "мне важно, чтобы ты чувствовала себя хорошо",
+    "пусть день будет лёгким и спокойным"
+]
+
+CLAUSES_B = [
+    "выпей таблеточку",
+    "прими лекарство",
+    "не забудь про капсулу",
+    "самое время для таблеточки",
+    "минутка для лекарства",
+    "давай не пропускать график",
+    "пусть режим будет ровным"
+]
+
+ADDONS = [
+    "и запей водичкой",
+    "а потом — тёплый чай",
+    "и улыбнись себе в зеркало",
+    "и сделай глубокий вдох",
+    "чуть‑чуть отдыха — и вперёд",
+    "и отметим это маленькой галочкой"
+]
+
+def build_text() -> str:
+    now = datetime.now(ALMATY_TZ)
+    weekday = WEEKDAY_RU[now.weekday()]
+    heart = random.choice(["❤️", "💖", "💗", "💕", "💞", "🩷", "💓", "💝"])
+    header = random.choice(HEADERS).replace("{weekday}", weekday)
+    # с вероятностью 50% добавим обращение
+    parts = []
+    if random.random() < 0.5:
+        parts.append(random.choice(STARTERS))
+    parts.append(random.choice(CLAUSES_A))
+    parts.append(random.choice(CLAUSES_B))
+    phrase = ", ".join(parts)
+    if random.random() < 0.7:
+        phrase = f"{phrase}, {random.choice(ADDONS)}."
+    else:
+        phrase = f"{phrase}."
+    return f"{heart}\\n{header}\\n\\n{phrase}"
+
+# ---------- КНОПКА "ПРИНЯЛ ✅" ----------
+ACK_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Принял ✅", callback_data="ack")]])
+
+# ---------- КОТИКИ ----------
 async def _fetch_random_cat_bytes() -> BytesIO | None:
     url = "https://cataas.com/cat"
     try:
@@ -60,21 +118,20 @@ async def _fetch_random_cat_bytes() -> BytesIO | None:
 
 async def _post_reminder_via_bot(bot):
     chat_id = CHANNEL_ID
-    phrase = random.choice(LOVE_PHRASES)
-    heart = random.choice(["❤️", "💖", "💗", "💕", "💞", "🩷"])
-    text = REMINDER_TEXT_TPL.format(heart=heart, phrase=phrase)
+    text = build_text()
 
     if random.random() < CAT_PROB:
         cat = await _fetch_random_cat_bytes()
         if cat is not None:
             try:
-                await bot.send_photo(chat_id=chat_id, photo=cat, caption=text, parse_mode=ParseMode.HTML)
+                await bot.send_photo(chat_id=chat_id, photo=cat, caption=text, parse_mode=ParseMode.HTML, reply_markup=ACK_KB)
                 return
             except Exception as e:
                 log.warning("Не удалось отправить фото котика: %s", e)
 
-    await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
+    await bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, reply_markup=ACK_KB)
 
+# ---------- ПРОСТОЙ ПЛАНИРОВЩИК (без JobQueue) ----------
 def _seconds_until_next_run(tz: ZoneInfo, hhmm: dtime) -> float:
     now = datetime.now(tz)
     target = now.replace(hour=hhmm.hour, minute=hhmm.minute, second=0, microsecond=0)
@@ -83,14 +140,12 @@ def _seconds_until_next_run(tz: ZoneInfo, hhmm: dtime) -> float:
     return (target - now).total_seconds()
 
 async def daily_scheduler(application: Application):
-    # простой планировщик без JobQueue
     while True:
         delay = _seconds_until_next_run(ALMATY_TZ, REMINDER_TIME)
         log.info("До следующего поста: %.0f сек.", delay)
         try:
             await asyncio.sleep(delay)
             await _post_reminder_via_bot(application.bot)
-            # небольшой буфер, чтобы не попасть в ту же минуту при задержках
             await asyncio.sleep(1)
         except asyncio.CancelledError:
             raise
@@ -98,12 +153,12 @@ async def daily_scheduler(application: Application):
             log.exception("Ошибка в планировщике: %s", e)
             await asyncio.sleep(5)
 
-# ---------- КОМАНДЫ БОТА ----------
+# ---------- КОМАНДЫ И ОБРАБОТЧИКИ ----------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Привет! Я публикую напоминания в канал каждый день в 08:00 (Алматы).\n"
-        "Команды:\n"
-        "• /test — тестовый пост в канал сейчас\n"
+        "Привет! Я публикую напоминания в канал каждый день в 08:00 (Алматы).\\n"
+        "Команды:\\n"
+        "• /test — тестовый пост в канал сейчас\\n"
         "• /invite — создать ссылку по заявке на вступление"
     )
 
@@ -118,11 +173,10 @@ async def invite_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             creates_join_request=True,
             name="Напоминания о лекарстве"
         )
-        await update.message.reply_text(f"Ссылка по заявке на вступление:\n{link.invite_link}")
+        await update.message.reply_text(f"Ссылка по заявке на вступление:\\n{link.invite_link}")
     except Exception as e:
         await update.message.reply_text(f"Не смог создать ссылку. Проверь права бота в канале. Ошибка: {e}")
 
-# Авто-одобрение заявок в канал
 async def approve_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         cj = update.chat_join_request
@@ -130,6 +184,14 @@ async def approve_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.info("Одобрена заявка пользователя %s в чат %s", cj.from_user.id, cj.chat.id)
     except Exception as e:
         log.warning("Не удалось одобрить заявку: %s", e)
+
+async def ack_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Простой «чек»: показываем тост «Принято ✅» и ничего не сохраняем
+    try:
+        query = update.callback_query
+        await query.answer("Принято ✅")  # короткое всплывающее уведомление
+    except Exception as e:
+        log.warning("Ошибка обработки ack: %s", e)
 
 # ---------- HTTP-СЕРВЕР ДЛЯ RENDER ----------
 async def start_http_server():
@@ -166,18 +228,22 @@ async def main():
         .build()
     )
 
+    # Команды
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("test", test_cmd))
     application.add_handler(CommandHandler("invite", invite_cmd))
+
+    # Кнопки
+    application.add_handler(CallbackQueryHandler(ack_button, pattern="^ack$"))
+
+    # Авто-апрув заявок
     application.add_handler(ChatJoinRequestHandler(approve_join))
 
     # --- старт Telegram (polling) ---
     await application.initialize()
-    # Если когда-то включали вебхук — снимем
     await application.bot.delete_webhook(drop_pending_updates=True)
-    # Запускаем polling и обработчики
+
     if application.updater is None:
-        # На всякий случай: если Updater не инициализировался, используем run_polling в отдельном таске
         async def _run_polling_blocking():
             await application.start()
             await application.run_polling()
@@ -188,7 +254,7 @@ async def main():
         polling_task = None
     log.info("Telegram bot polling started")
 
-    # --- параллельно поднимаем HTTP-сервер и планировщик ---
+    # --- параллельно HTTP-сервер и планировщик ---
     http_task = asyncio.create_task(start_http_server())
     sched_task = asyncio.create_task(daily_scheduler(application))
 
