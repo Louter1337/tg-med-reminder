@@ -49,8 +49,9 @@ HEADERS = [
     "Пусть {weekday} начнётся спокойно — лекарство вовремя."
 ]
 
+# БЕЗ запятой — добавим её программно, чтобы не было "Милая,,"
 STARTERS = [
-    "Любимая,", "Родная,", "Солнышко,", "Милая,", "Дорогая,", "Ласточка,", "Зайка,", "Ты моя радость,"
+    "Любимая", "Родная", "Солнышко", "Милая", "Дорогая", "Ласточка", "Зайка", "Ты моя радость"
 ]
 
 CLAUSES_A = [
@@ -88,18 +89,30 @@ def build_text() -> str:
     weekday = WEEKDAY_RU[now.weekday()]
     heart = random.choice(["❤️", "💖", "💗", "💕", "💞", "🩷", "💓", "💝"])
     header = random.choice(HEADERS).replace("{weekday}", weekday)
-    # с вероятностью 50% добавим обращение
-    parts = []
+
+    # Сформируем основную фразу
+    clause_a = random.choice(CLAUSES_A)
+    clause_b = random.choice(CLAUSES_B)
+    core = ", ".join([clause_a, clause_b])
+
+    # С вероятностью 50% добавим обращение (с запятой), без двойных запятых
     if random.random() < 0.5:
-        parts.append(random.choice(STARTERS))
-    parts.append(random.choice(CLAUSES_A))
-    parts.append(random.choice(CLAUSES_B))
-    phrase = ", ".join(parts)
+        greeting = f"{random.choice(STARTERS)},"
+        phrase = f"{greeting} {core}"
+    else:
+        phrase = core
+
+    # Опциональный хвост
     if random.random() < 0.7:
-        phrase = f"{phrase}, {random.choice(ADDONS)}."
+        phrase = f"{phrase}, {random.choice(ADDONS)}." 
     else:
         phrase = f"{phrase}."
-    return f"{heart}\\n{header}\\n\\n{phrase}"
+
+    # Многострочный f-строк (реальные переносы строк, НЕ \\n)
+    return f"""{heart}
+{header}
+
+{phrase}"""
 
 # ---------- КНОПКА "ПРИНЯЛ ✅" ----------
 ACK_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Принял ✅", callback_data="ack")]])
