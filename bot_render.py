@@ -1,7 +1,7 @@
-import os
 import asyncio
 import logging
 import random
+import signal
 from datetime import datetime, timedelta, time as dtime
 from io import BytesIO
 from zoneinfo import ZoneInfo
@@ -13,6 +13,8 @@ from telegram.ext import (
     ChatJoinRequestHandler, CallbackQueryHandler
 )
 import httpx
+
+STARTED_AT = datetime.utcnow()
 
 # ---------- ЛОГИ ----------
 logging.basicConfig(
@@ -45,11 +47,10 @@ HEADERS = [
     "Привычка, которая бережёт: лекарство к 08:00.",
     "Доброе утро и плюсик к самочувствию — лекарство.",
     "План на утро: лекарство — и вперёд по делам.",
-    "Утренний чек‑ин: лекарство в этот {weekday}.",
+    "Утренний чек-ин: лекарство в этот {weekday}.",
     "Пусть {weekday} начнётся спокойно — лекарство вовремя."
 ]
 
-# БЕЗ запятой — добавим её программно, чтобы не было "Милая,,"
 STARTERS = [
     "Любимая", "Родная", "Солнышко", "Милая", "Дорогая", "Ласточка", "Зайка", "Ты моя радость"
 ]
@@ -80,7 +81,7 @@ ADDONS = [
     "а потом — тёплый чай",
     "и улыбнись себе в зеркало",
     "и сделай глубокий вдох",
-    "чуть‑чуть отдыха — и вперёд",
+    "чуть-чуть отдыха — и вперёд",
     "и отметим это маленькой галочкой"
 ]
 
@@ -90,29 +91,25 @@ def build_text() -> str:
     heart = random.choice(["❤️", "💖", "💗", "💕", "💞", "🩷", "💓", "💝"])
     header = random.choice(HEADERS).replace("{weekday}", weekday)
 
-    # Сформируем основную фразу
     clause_a = random.choice(CLAUSES_A)
     clause_b = random.choice(CLAUSES_B)
     core = ", ".join([clause_a, clause_b])
 
-    # С вероятностью 50% добавим обращение (с запятой), без двойных запятых
     if random.random() < 0.5:
         greeting = f"{random.choice(STARTERS)},"
         phrase = f"{greeting} {core}"
     else:
         phrase = core
 
-    # Опциональный хвост
     if random.random() < 0.7:
-        phrase = f"{phrase}, {random.choice(ADDONS)}." 
+        phrase = f"{phrase}, {random.choice(ADDONS)}."
     else:
         phrase = f"{phrase}."
 
-    # Многострочный f-строк (реальные переносы строк, НЕ \\n)
-    return f"""{heart}
+    return f\"\"\"{heart}
 {header}
 
-{phrase}"""
+{phrase}\"\"\"
 
 # ---------- КНОПКА "ПРИНЯЛ ✅" ----------
 ACK_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Принял ✅", callback_data="ack")]])
@@ -121,7 +118,7 @@ ACK_KB = InlineKeyboardMarkup([[InlineKeyboardButton("Принял ✅", callbac
 async def _fetch_random_cat_bytes() -> BytesIO | None:
     url = "https://cataas.com/cat"
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=8.0) as client:
             r = await client.get(url)
             r.raise_for_status()
             return BytesIO(r.content)
@@ -199,10 +196,10 @@ async def approve_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log.warning("Не удалось одобрить заявку: %s", e)
 
 async def ack_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Простой «чек»: показываем тост «Принято ✅» и ничего не сохраняем
+    query = update.callback_query
     try:
-        query = update.callback_query
-        await query.answer("Принято ✅")  # короткое всплывающее уведомление
+        await query.answer("Принято ✅")
+        await query.edit_message_reply_markup(reply_markup=None)
     except Exception as e:
         log.warning("Ошибка обработки ack: %s", e)
 
@@ -211,7 +208,8 @@ async def start_http_server():
     from aiohttp import web
 
     async def healthz(request):
-        return web.Response(text="ok")
+        uptime = (datetime.utcnow() - STARTED_AT).total_seconds()
+        return web.Response(text=f"ok {int(uptime)}s")
 
     async def home(request):
         return web.Response(text="med-reminder is running")
@@ -220,64 +218,73 @@ async def start_http_server():
     app.router.add_get("/", home)
     app.router.add_get("/healthz", healthz)
 
-    port = int(os.getenv("PORT") or 10000)  # Render выдаёт PORT автоматически
+    port = int(os.getenv("PORT") or 10000)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=port)
     await site.start()
     log.info("HTTP server started on 0.0.0.0:%s", port)
-
-    # держим сервер живым
     await asyncio.Event().wait()
 
-# ---------- MAIN ----------
-async def main():
+# ---------- BOT LOOP ----------
+async def run_bot_loop():
+    from telegram.ext import Application
     if not BOT_TOKEN or not CHANNEL_ID:
         raise RuntimeError("Нужны переменные окружения BOT_TOKEN и CHANNEL_ID")
 
-    application: Application = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .build()
-    )
+    while True:
+        try:
+            application: Application = (
+                ApplicationBuilder()
+                .token(BOT_TOKEN)
+                .build()
+            )
 
-    # Команды
-    application.add_handler(CommandHandler("start", start_cmd))
-    application.add_handler(CommandHandler("test", test_cmd))
-    application.add_handler(CommandHandler("invite", invite_cmd))
+            application.add_handler(CommandHandler("start", start_cmd))
+            application.add_handler(CommandHandler("test", test_cmd))
+            application.add_handler(CommandHandler("invite", invite_cmd))
+            application.add_handler(CallbackQueryHandler(ack_button, pattern="^ack$"))
+            application.add_handler(ChatJoinRequestHandler(approve_join))
 
-    # Кнопки
-    application.add_handler(CallbackQueryHandler(ack_button, pattern="^ack$"))
+            await application.initialize()
+            await application.bot.delete_webhook(drop_pending_updates=True)
 
-    # Авто-апрув заявок
-    application.add_handler(ChatJoinRequestHandler(approve_join))
+            if application.updater is None:
+                await application.start()
+                log.info("Telegram bot polling (run_polling) starting")
+                await application.run_polling()
+            else:
+                await application.updater.start_polling()
+                await application.start()
+                log.info("Telegram bot polling started")
+                await application.updater.wait()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.exception("Бот упал, перезапускаю через 5 секунд: %s", e)
+            await asyncio.sleep(5)
 
-    # --- старт Telegram (polling) ---
-    await application.initialize()
-    await application.bot.delete_webhook(drop_pending_updates=True)
-
-    if application.updater is None:
-        async def _run_polling_blocking():
-            await application.start()
-            await application.run_polling()
-        polling_task = asyncio.create_task(_run_polling_blocking())
-    else:
-        await application.updater.start_polling()
-        await application.start()
-        polling_task = None
-    log.info("Telegram bot polling started")
-
-    # --- параллельно HTTP-сервер и планировщик ---
+# ---------- MAIN ----------
+async def main():
     http_task = asyncio.create_task(start_http_server())
-    sched_task = asyncio.create_task(daily_scheduler(application))
+    bot_task = asyncio.create_task(run_bot_loop())
 
-    try:
-        await asyncio.gather(http_task, sched_task, *( [polling_task] if polling_task else [] ))
-    finally:
-        if polling_task:
-            polling_task.cancel()
-        await application.stop()
-        await application.shutdown()
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+
+    def _graceful_shutdown():
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _graceful_shutdown)
+        except NotImplementedError:
+            pass
+
+    await stop_event.wait()
+    for t in (bot_task, http_task):
+        t.cancel()
+    await asyncio.gather(*[t for t in (bot_task, http_task)], return_exceptions=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
